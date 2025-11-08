@@ -1,0 +1,108 @@
+# ---------------------------------------------------------------
+# 🧩 IMPORT ALL REQUIRED LIBRARIES
+# ---------------------------------------------------------------
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import current_date, lit   # lit() is used to add constant values as a column
+import os
+import smtplib
+from email.mime.text import MIMEText
+import schedule
+import time
+import subprocess
+
+# ---------------------------------------------------------------
+# ⚙️ STEP 1: CREATE A SPARK SESSION
+# ---------------------------------------------------------------
+# SparkSession is the entry point for PySpark — like starting an engine.
+spark = SparkSession.builder \
+    .appName("Automated Fact Table Append and Load") \
+    .getOrCreate()
+
+# ---------------------------------------------------------------
+# 📂 STEP 2: DEFINE INPUT & OUTPUT PATHS
+# ---------------------------------------------------------------
+# input_folder: where all CSVs are stored
+# output_path: where you want the combined file to be saved
+input_folder = "/mnt/data/fact_files/"
+output_path = "/mnt/data/output/fact_combined.parquet"
+
+# ---------------------------------------------------------------
+# 🧮 STEP 3: READ MULTIPLE CSV FILES AND COMBINE THEM
+# ---------------------------------------------------------------
+
+# Get list of all files in the folder that end with '.csv'
+files = [f for f in os.listdir(input_folder) if f.endswith('.csv')]
+
+# Initialize a variable for combining data
+df_combined = None
+
+# Loop through each file
+for file in files:
+    file_path = os.path.join(input_folder, file)   # Create full file path
+    
+    # Read CSV as DataFrame, telling Spark to use header row for column names
+    df = spark.read.option("header", True).csv(file_path)
+    
+    # Add 2 new columns:
+    # 1️⃣ source_file: to remember which file the data came from
+    # 2️⃣ load_date: adds today’s date automatically
+    df = df.withColumn("source_file", lit(file)) \
+           .withColumn("load_date", current_date())
+    
+    # The 'lit()' function means “literal value” — it lets you add a fixed value to every row.
+    # Example: df.withColumn("country", lit("Australia")) → adds a new column 'country' with 'Australia' in every row.
+    
+    # Combine (append) this DataFrame to previous ones
+    if df_combined is None:
+        df_combined = df
+    else:
+        df_combined = df_combined.unionByName(df)   # unionByName aligns columns by name
+
+# ---------------------------------------------------------------
+# 🧹 STEP 4: DATA CLEANING
+# ---------------------------------------------------------------
+# Drop rows where ALL columns are null (completely empty rows)
+df_combined = df_combined.dropna(how="all")
+
+# ---------------------------------------------------------------
+# 💾 STEP 5: WRITE THE COMBINED DATA TO A FILE
+# ---------------------------------------------------------------
+# We use Parquet format because it’s compressed and faster for data warehouse queries.
+df_combined.write.mode("overwrite").parquet(output_path)
+
+print(f"✅ Combined {len(files)} files and saved final dataset to: {output_path}")
+
+# ---------------------------------------------------------------
+# 📩 STEP 6: SEND EMAIL NOTIFICATION (OPTIONAL)
+# ---------------------------------------------------------------
+def send_email():
+    sender = "etl-notify@company.com"
+    recipient = "data_team@company.com"
+    msg = MIMEText(f"ETL Job completed successfully. Output file saved to: {output_path}")
+    msg["Subject"] = "PySpark ETL Job Status"
+    msg["From"] = sender
+    msg["To"] = recipient
+
+    # Create email connection and send
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.starttls()
+        # replace below with valid credentials if used in real setup
+        server.login("your_email@gmail.com", "your_password")
+        server.sendmail(sender, recipient, msg.as_string())
+    print("📩 Notification email sent successfully.")
+
+# ---------------------------------------------------------------
+# 🕒 STEP 7: AUTOMATE JOB (RUN EVERY MORNING AT 7 AM)
+# ---------------------------------------------------------------
+# Define job function
+def job():
+    subprocess.call(["python3", "pyspark_etl.py"])  # runs the same script again
+    send_email()                                    # send notification
+
+# Schedule the job daily at 7 AM
+schedule.every().day.at("07:00").do(job)
+
+# Keep script running to check schedule every 60 seconds
+while True:
+    schedule.run_pending()
+    time.sleep(60)
